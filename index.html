@@ -175,6 +175,7 @@ svg { display: block; }
 }
 .board {
   display: grid;
+  touch-action: pan-y; /* Keep vertical scrolling native, allow reliable horizontal flicks. */
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 30px 24px;
   align-items: start;
@@ -617,7 +618,7 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
       // The tab strip scrolls horizontally; the open guide has its own swipes.
       if (state.open || e.touches.length !== 1 || e.target.closest('.filters')) return;
       const t = e.touches[0];
-      origin = { id: t.identifier, x: t.clientX, y: t.clientY };
+      origin = { id: t.identifier, x: t.clientX, y: t.clientY, time: e.timeStamp };
     }, { passive: true });
 
     app.addEventListener('touchmove', e => {
@@ -633,8 +634,11 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
       if (!t) return;
       const dx = t.clientX - start.x;
       const dy = t.clientY - start.y;
-      // Ignore vertical scrolling, small drags and diagonal movements.
-      if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
+      // Accept both deliberate drags and short, fast flicks while ignoring vertical scrolls.
+      const distance = Math.abs(dx);
+      const elapsed = Math.max(1, e.timeStamp - start.time);
+      const flick = distance >= 22 && elapsed <= 300 && distance / elapsed >= .35;
+      if (distance < Math.abs(dy) * 1.35 || (distance < 56 && !flick)) return;
 
       const tabs = Array.from(filtersEl.querySelectorAll('button[data-filter]'), b => b.dataset.filter);
       const index = tabs.indexOf(state.filter);
