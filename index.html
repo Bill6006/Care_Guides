@@ -148,7 +148,7 @@ svg { display: block; }
   border-radius: 9px;
   background: var(--ink);
   pointer-events: none;
-  transition: transform .2s cubic-bezier(.22, 1, .36, 1), width .2s cubic-bezier(.22, 1, .36, 1), background-color .2s;
+  transition: transform .4s var(--ease), width .4s var(--ease), background-color .3s;
 }
 .seg-ind[data-filter="health"] { background: var(--health); }
 .seg-ind[data-filter="hair"] { background: var(--hair); }
@@ -168,14 +168,6 @@ svg { display: block; }
 
 .person { margin-top: 30px; }
 .person + .person { margin-top: 46px; }
-/* Swipe snapshots sit above the board briefly; they never capture gestures. */
-#board { position: relative; }
-.tab-swipe-ghost {
-  position: absolute;
-  inset: 0 0 auto;
-  pointer-events: none;
-  z-index: 1;
-}
 .who {
   margin: 0 0 16px;
   font: 700 1.5rem/1.15 var(--font-display);
@@ -183,7 +175,6 @@ svg { display: block; }
 }
 .board {
   display: grid;
-  touch-action: pan-y; /* Keep vertical scrolling native, allow reliable horizontal flicks. */
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 30px 24px;
   align-items: start;
@@ -430,6 +421,12 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
 @keyframes vt-pop-in { from { opacity: 0; transform: scale(.95); } }
 @keyframes vt-pop-out { to { opacity: 0; transform: scale(.95); } }
 
+/* ---------- swipe between tabs (touch) ---------- */
+/* Vertical pans stay with the browser; sideways drags come to the page. Off while the
+   reader is open or the page is pinch-zoomed, so zoomed-in panning still works. */
+html.tab-swipe:not(.reader-open) { touch-action: pan-y pinch-zoom; }
+.app.swiping { overflow-x: clip; }
+
 /* ---------- print: the open sheet, nothing else ---------- */
 @media print {
   html.reader-open, html.reader-open body { overflow: visible !important; background: #fff; }
@@ -604,155 +601,218 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
     ind.dataset.filter = b.dataset.filter;
     if (instant) { void ind.offsetWidth; ind.style.transition = ''; }
   }
-  /* Instant tab changes with a brief, interruptible, compositor-friendly slide.
-     The outgoing content is visual only; the real tab switches immediately. */
-  let activeTabMotion = null;
-  function stopTabMotion() {
-    if (!activeTabMotion) return;
-    const motion = activeTabMotion;
-    activeTabMotion = null;
-    for (const a of motion.animations) a.cancel();
-    motion.ghost.remove();
+  function pressTabs() {
+    for (const b of filtersEl.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter));
   }
-  function snapshotTab() {
-    const ghost = h('div', { class: 'tab-swipe-ghost', 'aria-hidden': 'true' });
-    for (const person of boardEl.querySelectorAll('.person:not([hidden])')) {
-      const copy = person.cloneNode(true);
-      // Hidden shelves only waste image decoding and don't belong in the snapshot.
-      for (const hidden of copy.querySelectorAll('[hidden]')) hidden.remove();
-      ghost.append(copy);
-    }
-    return ghost;
+  function showShelves() {
+    for (const s of boardEl.querySelectorAll('.shelf')) s.hidden = state.filter !== 'all' && s.dataset.section !== state.filter;
+    for (const p of boardEl.querySelectorAll('.person')) p.hidden = !p.querySelector('.shelf:not([hidden])');
   }
-  function animateTabSwap(ghost, direction) {
-    if (!ghost || !ghost.childElementCount || !ghost.animate) return;
-    const incoming = Array.from(boardEl.querySelectorAll('.person:not([hidden])'));
-    const distance = Math.min(36, Math.max(22, Math.round(innerWidth * .075)));
-    const duration = 190;
-    const animations = [];
-    boardEl.append(ghost);
-    animations.push(ghost.animate([
-      { opacity: 1, transform: 'translate3d(0,0,0)' },
-      { opacity: 0, transform: 'translate3d(' + (-direction * 22) + 'px,0,0)' }
-    ], { duration: 155, easing: 'cubic-bezier(.4, 0, 1, 1)', fill: 'both' }));
-    for (const person of incoming) {
-      animations.push(person.animate([
-        { opacity: .7, transform: 'translate3d(' + (direction * distance) + 'px,0,0)' },
-        { opacity: 1, transform: 'translate3d(0,0,0)' }
-      ], { duration, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both' }));
-    }
-    const motion = { ghost, animations };
-    activeTabMotion = motion;
-    Promise.allSettled(animations.map(a => a.finished)).then(() => {
-      if (activeTabMotion === motion) stopTabMotion();
-    });
-  }
-  function setFilter(id, animate, swipeDirection = 0) {
+  function setFilter(id, animate) {
+    swipeFlush();
     if (id === state.filter) return;
-    stopTabMotion();
-    const ghost = swipeDirection && !reduce.matches && typeof Element.prototype.animate === 'function'
-      ? snapshotTab() : null;
     state.filter = id;
     const apply = () => {
-      for (const b of filtersEl.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter));
-      for (const s of boardEl.querySelectorAll('.shelf')) s.hidden = state.filter !== 'all' && s.dataset.section !== state.filter;
-      for (const p of boardEl.querySelectorAll('.person')) p.hidden = !p.querySelector('.shelf:not([hidden])');
-      placeIndicator(animate === false && !swipeDirection);
+      pressTabs();
+      showShelves();
+      placeIndicator(animate === false);
     };
-    if (animate === false) {
-      if (activeFilterTransition) {
-        activeFilterTransition.skipTransition();
-        activeFilterTransition = null;
-        ++vtSeq;
-        clearVT();
-      }
-      apply();
-      if (ghost) animateTabSwap(ghost, swipeDirection);
-    } else run('filter', apply);
+    if (animate === false) apply(); else run('filter', apply);
   }
 
-  /* ---------- swipe between category tabs on the board ---------- */
-  function enableTabSwipes() {
-    let origin = null;
-    let lastSwipe = null;
+  /* ---------- swipe between tabs (touch) ---------- */
+  // Drag sideways anywhere on the board and the tab follows the finger; let go past ~30% of
+  // the width, or flick, and it slides into the neighbouring tab. touch-action (CSS) keeps
+  // vertical pans with the browser, which cancels our pointer as soon as it starts scrolling.
+  const SLOP = 10;                                    // px of travel before a touch counts as a drag
+  const EASE = 'cubic-bezier(.22, .8, .24, 1)';       // same curve as --ease
+  const touches = new Set();
+  let sw = null, swAnim = null, swPhase = '', bx = 0, bo = 1, swGuardUntil = 0, masthead = null;
 
-    function swipeOneTab(dx) {
-      const tabs = Array.from(filtersEl.querySelectorAll('button[data-filter]'), b => b.dataset.filter);
-      const index = tabs.indexOf(state.filter);
-      const next = tabs[index + (dx < 0 ? 1 : -1)];
-      if (next) setFilter(next, false, dx < 0 ? 1 : -1); // Switch now; animation never blocks the next flick.
+  const tabIds = () => Array.from(filtersEl.querySelectorAll('button[data-filter]'), b => b.dataset.filter);
+  const tabBtn = id => id ? filtersEl.querySelector('button[data-filter="' + id + '"]') : null;
+  const btnBox = b => b ? { l: b.offsetLeft, t: b.offsetTop, w: b.offsetWidth } : null;
+  const pageZoomed = () => !!window.visualViewport && window.visualViewport.scale > 1.01;
+  const canSlide = () => !reduce.matches && typeof boardEl.animate === 'function';
+  const widthNow = () => root.clientWidth || window.innerWidth || 360;
+  const fadeAt = (x, W) => 1 - .4 * Math.min(1, Math.abs(x) / W);
+  function rubber(d, W) {                             // past the first or last tab: give a little, then resist
+    const m = Math.min(64, W * .16);
+    return Math.sign(d) * m * (1 - Math.exp(-Math.abs(d) / (m * 2.5)));
+  }
+  function syncSwipeable() { root.classList.toggle('tab-swipe', tabIds().length > 1 && !pageZoomed()); }
+
+  function paintBoard(x, o) {
+    bx = x; bo = o;
+    boardEl.style.transform = x ? 'translate3d(' + x.toFixed(2) + 'px,0,0)' : '';
+    boardEl.style.opacity = o < 1 ? o.toFixed(3) : '';
+  }
+  function swipeLayers(on) {
+    boardEl.style.willChange = on ? 'transform, opacity' : '';
+    app.classList.toggle('swiping', on);
+  }
+  function stopAnim(freeze) {
+    const a = swAnim;
+    if (!a) return;
+    let x = bx, o = bo;
+    if (freeze) {                                     // keep whatever is on screen right now
+      const cs = getComputedStyle(boardEl);
+      try { x = cs.transform === 'none' ? 0 : new DOMMatrixReadOnly(cs.transform).m41; } catch (e) {}
+      o = parseFloat(cs.opacity);
+      if (isNaN(o)) o = 1;
     }
+    swAnim = null; swPhase = '';
+    a.onfinish = null;
+    a.cancel();
+    if (freeze) paintBoard(x, o);
+  }
+  function animateBoard(from, to, ms, ease, phase, then) {
+    stopAnim(false);
+    paintBoard(to.x, to.o);                           // where it rests once the animation ends
+    swPhase = phase;
+    const a = swAnim = boardEl.animate([
+      { transform: 'translate3d(' + from.x.toFixed(2) + 'px,0,0)', opacity: from.o },
+      { transform: 'translate3d(' + to.x.toFixed(2) + 'px,0,0)', opacity: to.o },
+    ], { duration: ms, easing: ease });
+    a.onfinish = () => {
+      if (swAnim !== a) return;
+      swAnim = null; swPhase = '';
+      then();
+    };
+  }
+  function endSwipe() { paintBoard(0, 1); swipeLayers(false); }
+  function settleBack() {
+    ind.style.transition = '';
+    placeIndicator(false);
+    if ((!bx && bo >= 1) || !canSlide()) { stopAnim(false); endSwipe(); return; }
+    animateBoard({ x: bx, o: bo }, { x: 0, o: 1 }, Math.round(200 + Math.min(80, Math.abs(bx) * .25)), EASE, 'back', endSwipe);
+  }
+  const resume = () => { if (bx || bo < 1) settleBack(); };
+  function revealTab() {                              // keep the new tab in view if the bar scrolls sideways
+    const nav = filtersEl.parentElement, b = tabBtn(state.filter);
+    if (!b || nav.scrollWidth <= nav.clientWidth + 1) return;
+    const n = nav.getBoundingClientRect(), r = b.getBoundingClientRect(), pad = 16;
+    const d = r.left < n.left + pad ? r.left - n.left - pad : r.right > n.right - pad ? r.right - n.right + pad : 0;
+    if (d) nav.scrollBy({ left: d, behavior: reduce.matches ? 'auto' : 'smooth' });
+  }
+  function landTab() {
+    // With the tab bar pinned, open the new tab at its top rather than part-way down.
+    const nav = filtersEl.parentElement, cs = getComputedStyle(nav);
+    const lift = masthead.getBoundingClientRect().bottom + (parseFloat(cs.marginTop) || 0) - (parseFloat(cs.top) || 0);
+    const y = lift < 0 ? window.scrollY + lift : -1;
+    showShelves();
+    if (y >= 0) window.scrollTo(window.scrollX, y);
+  }
+  function goTab(id, dir, v) {
+    state.filter = id;
+    pressTabs();
+    ind.style.transition = '';
+    placeIndicator(false);
+    revealTab();
+    if (!canSlide()) { stopAnim(false); landTab(); endSwipe(); return; }
+    // Out: carry on at the finger's speed and fade. In: the new tab glides in from the far side.
+    const W = widthNow(), speed = Math.min(3, Math.max(.8, Math.abs(v)));
+    const ms = Math.round(Math.min(130, Math.max(70, W * .35 / speed)));
+    animateBoard({ x: bx, o: bo }, { x: bx - dir * speed * ms, o: 0 }, ms, 'linear', 'out', () => {
+      landTab();
+      animateBoard({ x: dir * Math.min(W * .22, 88), o: 0 }, { x: 0, o: 1 }, 260, EASE, 'in', endSwipe);
+    });
+  }
+  function swipeFlush() {                             // finish any swipe at once (a tap on a tab, Back, ...)
+    if (sw && sw.axis === 'x') { sw = null; ind.style.transition = ''; placeIndicator(true); }
+    const landing = swPhase === 'out';
+    stopAnim(false);
+    if (landing) landTab();
+    if (bx || bo < 1 || app.classList.contains('swiping')) endSwipe();
+  }
 
-    app.addEventListener('touchstart', e => {
-      origin = null;
-      // Let the category strip scroll and preserve the guide reader's own gestures.
-      if (state.open || e.touches.length !== 1 || e.target.closest('.filters')) return;
-      const t = e.touches[0];
-      origin = { id: t.identifier, x: t.clientX, y: t.clientY, time: e.timeStamp, axis: null, fired: false };
-    }, { passive: true });
+  function lockX(g, dx) {
+    g.axis = 'x';
+    g.x0 += dx > 0 ? SLOP : -SLOP;                    // pick up from here, so nothing jumps
+    if (activeVT) { try { activeVT.skipTransition(); } catch (e) {} }
+    const ids = tabIds(), i = ids.indexOf(state.filter);
+    g.W = widthNow();
+    g.prev = i > 0 ? ids[i - 1] : null;
+    g.next = i >= 0 && i < ids.length - 1 ? ids[i + 1] : null;
+    g.box = btnBox(tabBtn(state.filter));
+    g.boxPrev = btnBox(tabBtn(g.prev)) || g.box;
+    g.boxNext = btnBox(tabBtn(g.next)) || g.box;
+    ind.style.transition = 'none';
+    swipeLayers(true);
+  }
+  function dragTo(g, cx, cy, t) {
+    const raw = g.base + cx - g.x0, ahead = raw < 0 ? g.next : g.prev;
+    const x = ahead ? raw : rubber(raw, g.W);
+    const k = Math.min(1, Math.abs(cx - g.x0) / 48);  // blend from the opacity it was caught at
+    paintBoard(x, g.o0 + (fadeAt(x, g.W) - g.o0) * k);
+    const a = g.box, b = raw < 0 ? g.boxNext : g.boxPrev;
+    if (a) {                                          // the tab indicator leans toward where you're heading
+      const p = Math.min(1, Math.abs(x) * 1.5 / g.W);
+      ind.style.width = (a.w + (b.w - a.w) * p) + 'px';
+      ind.style.transform = 'translate(' + (a.l + (b.l - a.l) * p) + 'px,' + a.t + 'px)';
+    }
+    g.pts.push({ t: t, x: cx, y: cy });
+    while (g.pts.length > 2 && t - g.pts[0].t > 100) g.pts.shift();
+  }
+  function decide(g) {
+    const p = g.pts, last = p[p.length - 1];
+    let ref = p[0];
+    for (let i = p.length - 2; i >= 0; i--) { ref = p[i]; if (last.t - ref.t >= 60) break; }
+    const dt = last.t - ref.t;
+    const vx = dt >= 8 ? (last.x - ref.x) / dt : 0, vy = dt >= 8 ? (last.y - ref.y) / dt : 0;
+    const x = bx, dir = x < 0 ? 1 : -1, to = dir > 0 ? g.next : g.prev;
+    const sideways = Math.abs(last.x - g.sx) > Math.abs(last.y - g.y0);
+    const fast = Math.abs(vx) > .35 && Math.abs(vx) > Math.abs(vy);
+    const flick = fast && Math.sign(vx) === Math.sign(x) && Math.abs(x) > 16;
+    const far = Math.abs(x) > Math.min(g.W * .3, 150) && !(fast && Math.sign(vx) !== Math.sign(x));
+    if (to && sideways && (flick || far)) goTab(to, dir, vx); else settleBack();
+  }
 
-    app.addEventListener('touchmove', e => {
-      if (!origin) return;
-      if (e.touches.length !== 1 || state.open) { origin = null; return; }
-      const t = Array.from(e.touches).find(t => t.identifier === origin.id);
-      if (!t || origin.fired) return;
-      const dx = t.clientX - origin.x, dy = t.clientY - origin.y;
-      const ax = Math.abs(dx), ay = Math.abs(dy);
-
-      // Lock the gesture's direction before changing tabs, so vertical scrolls stay native.
-      if (!origin.axis && Math.max(ax, ay) >= 9) {
-        if (ay > ax * 1.25) origin.axis = 'vertical';
-        else if (ax > ay * 1.25) origin.axis = 'horizontal';
-      }
-      // Switch during a clear sideways flick, not after the finger lifts.
-      if (origin.axis === 'horizontal' && ax >= 20 && ax > ay * 1.25) {
-        origin.fired = true; // Exactly one tab change per touch gesture.
-        swipeOneTab(dx);
-      }
-    }, { passive: true });
-
-    app.addEventListener('touchend', e => {
-      if (!origin) return;
-      const start = origin;
-      origin = null;
-      const t = Array.from(e.changedTouches).find(t => t.identifier === start.id);
-      if (!t) return;
-      if (state.open) return;
-
-      if (!start.fired && start.axis !== 'vertical') {
-        const dx = t.clientX - start.x, dy = t.clientY - start.y;
-        const ax = Math.abs(dx), ay = Math.abs(dy);
-        const elapsed = Math.max(1, e.timeStamp - start.time);
-        // Fallback for a quick flick whose entire movement arrives at touchend.
-        const flick = ax >= 17 && elapsed <= 260 && ax / elapsed >= .3;
-        const drag = ax >= 42;
-        if (ax > ay * 1.25 && (flick || drag)) {
-          start.fired = true;
-          swipeOneTab(dx);
-        }
-      }
-      if (start.fired) {
-        // Avoid opening a card at the release point; no cooldown between actual swipes.
-        e.preventDefault();
-        lastSwipe = { x: t.clientX, y: t.clientY, until: performance.now() + 320 };
-      }
-    }, { passive: false });
-
-    app.addEventListener('touchcancel', () => { origin = null; }, { passive: true });
-    app.addEventListener('click', e => {
-      // Defensive fallback for browsers that still synthesize a click after touchend.
-      if (lastSwipe && performance.now() < lastSwipe.until &&
-          Math.abs(e.clientX - lastSwipe.x) < 30 &&
-          Math.abs(e.clientY - lastSwipe.y) < 30 && e.detail !== 0) {
-        lastSwipe = null;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-      }
-    }, true);
+  function swDown(e) {
+    if (e.pointerType !== 'touch') return;
+    if (e.isPrimary) touches.clear();
+    touches.add(e.pointerId);
+    if (touches.size > 1) {                           // a second finger means pinch, not swipe
+      if (sw) { const g = sw; sw = null; if (g.axis === 'x') swGuardUntil = performance.now() + 300; settleBack(); }
+      return;
+    }
+    if (state.open || !e.target.closest || e.target.closest('.filters') || pageZoomed() || tabIds().length < 2) return;
+    let base = 0;
+    if (swPhase === 'out') swipeFlush();             // flicking again before the last one landed
+    else if (swAnim) { stopAnim(true); base = bx; }  // catch a settle mid-flight
+    sw = { id: e.pointerId, sx: e.clientX, x0: e.clientX, y0: e.clientY, t0: e.timeStamp, base: base, o0: bo, axis: '',
+           pts: [{ t: e.timeStamp, x: e.clientX, y: e.clientY }] };
+  }
+  function swMove(e) {
+    const g = sw;
+    if (!g || e.pointerId !== g.id || g.axis === 'y') return;
+    if (!g.axis) {
+      const dx = e.clientX - g.x0, dy = e.clientY - g.y0, ax = Math.abs(dx), ay = Math.abs(dy);
+      if (ax < SLOP && ay < SLOP) return;
+      if (ay >= ax) { g.axis = 'y'; resume(); return; }   // vertical: the browser scrolls, we step aside
+      lockX(g, dx);
+    }
+    dragTo(g, e.clientX, e.clientY, e.timeStamp);
+  }
+  function swUp(e) {
+    if (e.pointerType === 'touch') touches.delete(e.pointerId);
+    const g = sw;
+    if (!g || e.pointerId !== g.id) return;
+    sw = null;
+    const cancelled = e.type === 'pointercancel';
+    if (!g.axis && !cancelled) {                      // a flick so quick no move got past the slop first
+      const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
+      if (Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy) * 1.5 && e.timeStamp - g.t0 < 200) lockX(g, dx);
+    }
+    if (g.axis !== 'x') { resume(); return; }
+    swGuardUntil = performance.now() + 300;
+    if (cancelled) { settleBack(); return; }
+    dragTo(g, e.clientX, e.clientY, e.timeStamp);
+    decide(g);
   }
 
   /* ---------- view transitions (plain instant changes where unsupported) ---------- */
-  let vtSeq = 0, named = [], activeFilterTransition = null;
+  let vtSeq = 0, named = [], activeVT = null;
   const canVT = () => typeof document.startViewTransition === 'function' && !reduce.matches;
   function nameEl(el, n) { if (el) { el.style.viewTransitionName = n; named.push(el); } }
   function clearVT() {
@@ -761,10 +821,6 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
     delete root.dataset.vt;
   }
   function run(kind, update, hooks) {
-    if (activeFilterTransition) {
-      activeFilterTransition.skipTransition();
-      activeFilterTransition = null;
-    }
     clearVT();
     if (!canVT()) { update(); return; }
     const my = ++vtSeq;
@@ -777,11 +833,8 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
         await update();
       });
     } catch (e) { clearVT(); update(); return; }
-    if (kind === 'filter') activeFilterTransition = t;
-    const done = () => {
-      if (activeFilterTransition === t) activeFilterTransition = null;
-      if (my === vtSeq) clearVT();
-    };
+    activeVT = t;
+    const done = () => { if (my === vtSeq) clearVT(); if (activeVT === t) activeVT = null; };
     t.finished.then(done, done);
     t.ready.catch(() => {});
     t.updateCallbackDone.catch(() => {});
@@ -1128,6 +1181,7 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
     reader = $('#reader'); stage = $('#stage'); rImg = $('#rImg'); rTitle = $('#rTitle'); rMeta = $('#rMeta');
     chipsEl = $('#chips'); switcher = $('#switcher'); hint = $('#hint');
     zIn = $('#zIn'); zOut = $('#zOut'); zFit = $('#zFit');
+    masthead = $('.masthead');
 
     if (!canVT()) root.classList.add('no-vt');
     root.classList.add('booting');
@@ -1136,8 +1190,8 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
     $('#lede').textContent = guides.length + ' routines and action plans. Pick one to open it full size.';
     renderFilters();
     renderBoard();
-    enableTabSwipes();
     placeIndicator(true);
+    syncSwipeable();
     if (window.ResizeObserver) {
       new ResizeObserver(() => placeIndicator(true)).observe(filtersEl);
       new ResizeObserver(() => {
@@ -1178,6 +1232,14 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
     stage.addEventListener('wheel', onWheel, { passive: false });
     stage.addEventListener('dragstart', e => e.preventDefault());
     document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', swDown);
+    document.addEventListener('pointermove', swMove);
+    document.addEventListener('pointerup', swUp);
+    document.addEventListener('pointercancel', swUp);
+    document.addEventListener('click', e => {         // a drag never doubles as a tap on a card
+      if (performance.now() < swGuardUntil) { e.preventDefault(); e.stopPropagation(); }
+    }, true);
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', syncSwipeable);
     window.addEventListener('popstate', () => syncFromLocation());
     window.addEventListener('hashchange', () => syncFromLocation());
     syncFromLocation(true);
