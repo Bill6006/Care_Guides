@@ -605,54 +605,91 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
       for (const p of boardEl.querySelectorAll('.person')) p.hidden = !p.querySelector('.shelf:not([hidden])');
       placeIndicator(animate === false);
     };
-    if (animate === false) apply(); else run('filter', apply);
+    if (animate === false) {
+      if (activeFilterTransition) {
+        activeFilterTransition.skipTransition();
+        activeFilterTransition = null;
+        ++vtSeq;
+        clearVT();
+      }
+      apply();
+    } else run('filter', apply);
   }
 
   /* ---------- swipe between category tabs on the board ---------- */
   function enableTabSwipes() {
     let origin = null;
-    let ignoreClickUntil = 0;
+    let lastSwipe = null;
+
+    function swipeOneTab(dx) {
+      const tabs = Array.from(filtersEl.querySelectorAll('button[data-filter]'), b => b.dataset.filter);
+      const index = tabs.indexOf(state.filter);
+      const next = tabs[index + (dx < 0 ? 1 : -1)];
+      if (next) setFilter(next, false); // Update immediately; don't queue a view transition.
+    }
 
     app.addEventListener('touchstart', e => {
       origin = null;
-      // The tab strip scrolls horizontally; the open guide has its own swipes.
+      // Let the category strip scroll and preserve the guide reader's own gestures.
       if (state.open || e.touches.length !== 1 || e.target.closest('.filters')) return;
       const t = e.touches[0];
-      origin = { id: t.identifier, x: t.clientX, y: t.clientY, time: e.timeStamp };
+      origin = { id: t.identifier, x: t.clientX, y: t.clientY, time: e.timeStamp, axis: null, fired: false };
     }, { passive: true });
 
     app.addEventListener('touchmove', e => {
-      if (e.touches.length !== 1) origin = null;
+      if (!origin) return;
+      if (e.touches.length !== 1 || state.open) { origin = null; return; }
+      const t = Array.from(e.touches).find(t => t.identifier === origin.id);
+      if (!t || origin.fired) return;
+      const dx = t.clientX - origin.x, dy = t.clientY - origin.y;
+      const ax = Math.abs(dx), ay = Math.abs(dy);
+
+      // Lock the gesture's direction before changing tabs, so vertical scrolls stay native.
+      if (!origin.axis && Math.max(ax, ay) >= 9) {
+        if (ay > ax * 1.25) origin.axis = 'vertical';
+        else if (ax > ay * 1.25) origin.axis = 'horizontal';
+      }
+      // Switch during a clear sideways flick, not after the finger lifts.
+      if (origin.axis === 'horizontal' && ax >= 20 && ax > ay * 1.25) {
+        origin.fired = true; // Exactly one tab change per touch gesture.
+        swipeOneTab(dx);
+      }
     }, { passive: true });
 
     app.addEventListener('touchend', e => {
       if (!origin) return;
       const start = origin;
       origin = null;
-      if (state.open) return;
       const t = Array.from(e.changedTouches).find(t => t.identifier === start.id);
       if (!t) return;
-      const dx = t.clientX - start.x;
-      const dy = t.clientY - start.y;
-      // Accept both deliberate drags and short, fast flicks while ignoring vertical scrolls.
-      const distance = Math.abs(dx);
-      const elapsed = Math.max(1, e.timeStamp - start.time);
-      const flick = distance >= 22 && elapsed <= 300 && distance / elapsed >= .35;
-      if (distance < Math.abs(dy) * 1.35 || (distance < 56 && !flick)) return;
+      if (state.open) return;
 
-      const tabs = Array.from(filtersEl.querySelectorAll('button[data-filter]'), b => b.dataset.filter);
-      const index = tabs.indexOf(state.filter);
-      const next = tabs[index + (dx < 0 ? 1 : -1)];
-      if (!next) return; // Stop at the first/last tab rather than wrapping.
-
-      ignoreClickUntil = performance.now() + 350;
-      setFilter(next);
-    }, { passive: true });
+      if (!start.fired && start.axis !== 'vertical') {
+        const dx = t.clientX - start.x, dy = t.clientY - start.y;
+        const ax = Math.abs(dx), ay = Math.abs(dy);
+        const elapsed = Math.max(1, e.timeStamp - start.time);
+        // Fallback for a quick flick whose entire movement arrives at touchend.
+        const flick = ax >= 17 && elapsed <= 260 && ax / elapsed >= .3;
+        const drag = ax >= 42;
+        if (ax > ay * 1.25 && (flick || drag)) {
+          start.fired = true;
+          swipeOneTab(dx);
+        }
+      }
+      if (start.fired) {
+        // Avoid opening a card at the release point; no cooldown between actual swipes.
+        e.preventDefault();
+        lastSwipe = { x: t.clientX, y: t.clientY, until: performance.now() + 320 };
+      }
+    }, { passive: false });
 
     app.addEventListener('touchcancel', () => { origin = null; }, { passive: true });
     app.addEventListener('click', e => {
-      // Don't open a guide from a synthetic click at the end of a swipe.
-      if (performance.now() < ignoreClickUntil) {
+      // Defensive fallback for browsers that still synthesize a click after touchend.
+      if (lastSwipe && performance.now() < lastSwipe.until &&
+          Math.abs(e.clientX - lastSwipe.x) < 30 &&
+          Math.abs(e.clientY - lastSwipe.y) < 30 && e.detail !== 0) {
+        lastSwipe = null;
         e.preventDefault();
         e.stopImmediatePropagation();
       }
@@ -660,7 +697,7 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
   }
 
   /* ---------- view transitions (plain instant changes where unsupported) ---------- */
-  let vtSeq = 0, named = [];
+  let vtSeq = 0, named = [], activeFilterTransition = null;
   const canVT = () => typeof document.startViewTransition === 'function' && !reduce.matches;
   function nameEl(el, n) { if (el) { el.style.viewTransitionName = n; named.push(el); } }
   function clearVT() {
@@ -669,6 +706,10 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
     delete root.dataset.vt;
   }
   function run(kind, update, hooks) {
+    if (activeFilterTransition) {
+      activeFilterTransition.skipTransition();
+      activeFilterTransition = null;
+    }
     clearVT();
     if (!canVT()) { update(); return; }
     const my = ++vtSeq;
@@ -681,7 +722,11 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
         await update();
       });
     } catch (e) { clearVT(); update(); return; }
-    const done = () => { if (my === vtSeq) clearVT(); };
+    if (kind === 'filter') activeFilterTransition = t;
+    const done = () => {
+      if (activeFilterTransition === t) activeFilterTransition = null;
+      if (my === vtSeq) clearVT();
+    };
     t.finished.then(done, done);
     t.ready.catch(() => {});
     t.updateCallbackDone.catch(() => {});
