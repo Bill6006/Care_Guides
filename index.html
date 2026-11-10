@@ -148,7 +148,7 @@ svg { display: block; }
   border-radius: 9px;
   background: var(--ink);
   pointer-events: none;
-  transition: transform .4s var(--ease), width .4s var(--ease), background-color .3s;
+  transition: transform .2s cubic-bezier(.22, 1, .36, 1), width .2s cubic-bezier(.22, 1, .36, 1), background-color .2s;
 }
 .seg-ind[data-filter="health"] { background: var(--health); }
 .seg-ind[data-filter="hair"] { background: var(--hair); }
@@ -168,6 +168,14 @@ svg { display: block; }
 
 .person { margin-top: 30px; }
 .person + .person { margin-top: 46px; }
+/* Swipe snapshots sit above the board briefly; they never capture gestures. */
+#board { position: relative; }
+.tab-swipe-ghost {
+  position: absolute;
+  inset: 0 0 auto;
+  pointer-events: none;
+  z-index: 1;
+}
 .who {
   margin: 0 0 16px;
   font: 700 1.5rem/1.15 var(--font-display);
@@ -596,14 +604,60 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
     ind.dataset.filter = b.dataset.filter;
     if (instant) { void ind.offsetWidth; ind.style.transition = ''; }
   }
-  function setFilter(id, animate) {
+  /* Instant tab changes with a brief, interruptible, compositor-friendly slide.
+     The outgoing content is visual only; the real tab switches immediately. */
+  let activeTabMotion = null;
+  function stopTabMotion() {
+    if (!activeTabMotion) return;
+    const motion = activeTabMotion;
+    activeTabMotion = null;
+    for (const a of motion.animations) a.cancel();
+    motion.ghost.remove();
+  }
+  function snapshotTab() {
+    const ghost = h('div', { class: 'tab-swipe-ghost', 'aria-hidden': 'true' });
+    for (const person of boardEl.querySelectorAll('.person:not([hidden])')) {
+      const copy = person.cloneNode(true);
+      // Hidden shelves only waste image decoding and don't belong in the snapshot.
+      for (const hidden of copy.querySelectorAll('[hidden]')) hidden.remove();
+      ghost.append(copy);
+    }
+    return ghost;
+  }
+  function animateTabSwap(ghost, direction) {
+    if (!ghost || !ghost.childElementCount || !ghost.animate) return;
+    const incoming = Array.from(boardEl.querySelectorAll('.person:not([hidden])'));
+    const distance = Math.min(36, Math.max(22, Math.round(innerWidth * .075)));
+    const duration = 190;
+    const animations = [];
+    boardEl.append(ghost);
+    animations.push(ghost.animate([
+      { opacity: 1, transform: 'translate3d(0,0,0)' },
+      { opacity: 0, transform: 'translate3d(' + (-direction * 22) + 'px,0,0)' }
+    ], { duration: 155, easing: 'cubic-bezier(.4, 0, 1, 1)', fill: 'both' }));
+    for (const person of incoming) {
+      animations.push(person.animate([
+        { opacity: .7, transform: 'translate3d(' + (direction * distance) + 'px,0,0)' },
+        { opacity: 1, transform: 'translate3d(0,0,0)' }
+      ], { duration, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both' }));
+    }
+    const motion = { ghost, animations };
+    activeTabMotion = motion;
+    Promise.allSettled(animations.map(a => a.finished)).then(() => {
+      if (activeTabMotion === motion) stopTabMotion();
+    });
+  }
+  function setFilter(id, animate, swipeDirection = 0) {
     if (id === state.filter) return;
+    stopTabMotion();
+    const ghost = swipeDirection && !reduce.matches && typeof Element.prototype.animate === 'function'
+      ? snapshotTab() : null;
     state.filter = id;
     const apply = () => {
       for (const b of filtersEl.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter));
       for (const s of boardEl.querySelectorAll('.shelf')) s.hidden = state.filter !== 'all' && s.dataset.section !== state.filter;
       for (const p of boardEl.querySelectorAll('.person')) p.hidden = !p.querySelector('.shelf:not([hidden])');
-      placeIndicator(animate === false);
+      placeIndicator(animate === false && !swipeDirection);
     };
     if (animate === false) {
       if (activeFilterTransition) {
@@ -613,6 +667,7 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
         clearVT();
       }
       apply();
+      if (ghost) animateTabSwap(ghost, swipeDirection);
     } else run('filter', apply);
   }
 
@@ -625,7 +680,7 @@ html[data-vt="filter"]::view-transition-old(*):only-child { animation: .18s ease
       const tabs = Array.from(filtersEl.querySelectorAll('button[data-filter]'), b => b.dataset.filter);
       const index = tabs.indexOf(state.filter);
       const next = tabs[index + (dx < 0 ? 1 : -1)];
-      if (next) setFilter(next, false); // Update immediately; don't queue a view transition.
+      if (next) setFilter(next, false, dx < 0 ? 1 : -1); // Switch now; animation never blocks the next flick.
     }
 
     app.addEventListener('touchstart', e => {
